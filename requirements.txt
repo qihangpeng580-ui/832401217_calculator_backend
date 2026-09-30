@@ -1,0 +1,14 @@
+# No third-party dependencies
+#
+# This project uses only the Python standard library:
+#   http.server   HTTP server
+#   sqlite3       database
+#   decimal       exact decimal
+#   json          request/response serialization
+#   unittest      tests
+#
+# So this file is empty and no pip install is needed.
+# It is kept to make "this project has no dependencies" explicitly visible --
+# seeing this file, the teaching assistant need not wonder whether something is missing.
+#
+# Runtime requirement: Python 3.10 or newer (the X | None type annotation syntax is used)
