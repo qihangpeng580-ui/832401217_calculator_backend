@@ -51,8 +51,8 @@
 │   ├── main.py                     模块说明与装配示例
 │   ├── calculator/                 表达式处理（本项目最核心的部分）
 │   │   ├── tokenizer.py            词法分析：字符串 → 记号序列
-│   │   ├── parser.py               语法分析：记号序列 → 语法树   ← 含待实现部分
-│   │   └── evaluator.py            求值：语法树 → 结果
+│   │   ├── parser.py               语法分析：记号序列 → 语法树（递归下降）
+│   │   └── evaluator.py            求值：语法树 → 结果（后序遍历）
 │   ├── service/
 │   │   ├── calculator_service.py   编排"解析 → 求值 → 格式化"
 │   │   └── history_service.py      编排"计算 + 写库"、历史查询与删除
@@ -69,6 +69,7 @@
 │   └── test_store.py               27 项
 ├── tools/
 │   ├── blackbox.py                 黑盒验收：用真实 HTTP 请求走完整流程
+│   ├── push_via_api.py             通过 GitHub API 推送（本机 git push 走不通时的备用方案）
 │   ├── verify_full.py              开发用：临时填上解析器以验证整条链路
 │   └── verify_skeleton.py          开发用：单独验证解析器骨架
 └── data/                           运行时生成 calculator.db（已 gitignore）
