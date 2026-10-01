@@ -182,49 +182,55 @@ class Parser:
         return node
 
     # --------------------------------------------------------------
-    # ★ 下面三个是本文件的核心，前两个留给你实现
+    # ★ 下面三个是本文件的核心
     # --------------------------------------------------------------
 
     def _parse_expression(self) -> Node:
         """解析"加减"这一层。对应文法：expression := term (("+" | "-") term)*
 
-        ============ TODO：你来写（约 10 行） ============
+        实现思路（左结合）：
+            1. 先解析出左边的一个项
+            2. 只要后面跟着 "+" 或 "-"，就取走它、再解析一个项，
+               然后把「已经解析出来的结果」当作**左子树**组合起来
+            3. 循环结束时，整串加减都被组合成了一棵左倾的树
 
-        思路（左边先算，所以叫"左结合"）：
-            1. 先解析出左边的一个 term：  node = self._parse_term()
-            2. 循环：只要当前记号是 "+" 或 "-"：
-                 a. 用 self._match_operator("+", "-") 取走它，拿到 op
-                 b. 再解析出右边的一个 term：  right = self._parse_term()
-                 c. 把两者组成新节点：node = BinaryOp(op, node, right)
-                    ★ 注意是用**原来的 node 当左子树**，
-                      这样 "1+2+3" 会自然变成 ((1+2)+3)，也就是从左往右算。
-            3. 返回 node
+        为什么用"每轮把 node 放左边"就能实现左结合：
+            "1-2-3" 应该是 (1-2)-3 = -4，而不是 1-(2-3) = 2。
+            每转一圈都把"到目前为止算出的部分"放在左边，所以天然从左往右。
 
-        为什么用"循环 + 每轮把 node 当左子树"就能实现左结合：
-            "1-2-3" 应该等于 (1-2)-3 = -4，而不是 1-(2-3) = 2。
-            因为每转一圈都把"到目前为止的结果"放在左边，所以天然是从左往右。
-
-        提示：_match_operator 会在不匹配时返回 None，所以可以直接写
-              while (op := self._match_operator("+", "-")) is not None:
-        =================================================
+        为什么这一层的优先级最低：
+            因为它调用的 _parse_term 会把乘除**整个吃下去**当作一个项，
+            所以乘除先被组合成子树 —— 优先级是靠函数调用层次实现的，
+            不是靠一张优先级表。判断优先级实现的唯一标准就是这一句：
+            _parse_expression 里必须调 _parse_term，而不能调自己。
         """
-        raise NotImplementedError("TODO: 实现 _parse_expression —— 见上面的注释")
+        node = self._parse_term()
+
+        # 海象运算符（:=）在条件里赋值，省掉"先赋值再判断"的两行。
+        # _match_operator 不匹配时返回 None，所以循环条件天然成立。
+        while (op := self._match_operator("+", "-")) is not None:
+            right = self._parse_term()
+            node = BinaryOp(op, node, right)
+
+        return node
 
     def _parse_term(self) -> Node:
         """解析"乘除"这一层。对应文法：term := factor (("*" | "/") factor)*
 
-        ============ TODO：你来写（约 8 行） ============
-
-        和 _parse_expression 几乎一模一样，只有两点不同：
-            1. 调的是 self._parse_factor()（而不是 _parse_term）
+        和 _parse_expression 的结构完全一样，只有两处不同：
+            1. 调的是 _parse_factor（而不是 _parse_term）
             2. 匹配的运算符是 "*" 和 "/"
 
-        为什么它比 _parse_expression"优先级高"：
-            因为 _parse_expression 调用了 _parse_term，所以乘除会先被组合成子树。
-            这个文件开头的文法说明里有图示。
-        =================================================
+        ★ 这里千万不能调用 _parse_expression ——
+          那会让乘除变成和加减同一层，优先级就没了（1+2*3 会算成 9 而不是 7）。
         """
-        raise NotImplementedError("TODO: 实现 _parse_term —— 见上面的注释")
+        node = self._parse_factor()
+
+        while (op := self._match_operator("*", "/")) is not None:
+            right = self._parse_factor()
+            node = BinaryOp(op, node, right)
+
+        return node
 
     def _parse_factor(self) -> Node:
         """解析"因子"这一层。对应文法：
