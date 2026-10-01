@@ -59,27 +59,57 @@ def find_token() -> str:
     raise SystemExit("找不到 GitHub 令牌：请设置环境变量 GITHUB_TOKEN，或确认 ~/.git-credentials 里有 github.com 条目")
 
 
-def api_request(method: str, path: str, token: str, body: dict | None = None) -> tuple[int, dict]:
-    """调用 GitHub API。"""
+def api_request(
+    method: str,
+    path: str,
+    token: str,
+    body: dict | None = None,
+    retries: int = 4,
+) -> tuple[int, dict]:
+    """调用 GitHub API，带重试。
+
+    ★ 为什么要重试：
+       本机网络在推送到一半时出现过 RemoteDisconnected（连接被切断）。
+       这是网络层的问题，不是请求本身有问题 —— 重试通常就能成功。
+       没有重试的脚本推到第 20 个文件断掉，前面 19 个要重推一遍，很浪费时间。
+    """
+    import time
+
     url = API + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"token {token}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "dsh-push-script")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
 
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode("utf-8")
-            return resp.status, (json.loads(raw) if raw else {})
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"token {token}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("User-Agent", "dsh-push-script")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+
         try:
-            return exc.code, json.loads(raw)
-        except json.JSONDecodeError:
-            return exc.code, {"message": raw}
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                raw = resp.read().decode("utf-8")
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            # 5xx 是服务端临时问题，值得重试；4xx 是请求本身的问题，重试没用
+            if exc.code >= 500 and attempt < retries - 1:
+                last_error = exc
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            try:
+                return exc.code, json.loads(raw)
+            except json.JSONDecodeError:
+                return exc.code, {"message": raw}
+        except Exception as exc:  # noqa: BLE001 - 连接层错误也重试
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+
+    raise last_error if last_error else RuntimeError("请求失败且没有记录到异常")
 
 
 def collect_files() -> list[Path]:
@@ -97,15 +127,33 @@ def collect_files() -> list[Path]:
     return files
 
 
-def get_remote_sha(token: str, rel_path: str) -> str | None:
-    """取远端某个文件的当前 sha（更新已存在的文件时必须提供）。"""
-    # 路径里的特殊字符要转义
+def get_remote_state(token: str, rel_path: str) -> tuple[str | None, bytes | None]:
+    """取远端文件的 (sha, 内容)。
+
+    为什么连内容一起取：
+        网络中断后重跑脚本时，如果只比对 sha 是没法判断"本地和远端是否一致"的
+        （远端 sha 是 git blob 的哈希，本地算不出来除非自己实现 git 的哈希算法）。
+        直接取回内容比对，才能跳过没变的文件，实现真正的断点续传。
+        代价是多一次请求，但比重复上传整个文件便宜。
+    """
     from urllib.parse import quote
 
-    status, data = api_request("GET", f"/repos/{OWNER}/{REPO}/contents/{quote(rel_path)}?ref={BRANCH}", token)
-    if status == 200:
-        return data.get("sha")
-    return None
+    status, data = api_request(
+        "GET", f"/repos/{OWNER}/{REPO}/contents/{quote(rel_path, safe='/')}?ref={BRANCH}", token
+    )
+    if status != 200:
+        return None, None
+
+    sha = data.get("sha")
+    encoded = data.get("content")
+    if not encoded:
+        return sha, None
+
+    try:
+        # GitHub 返回的 base64 里带换行，要去掉
+        return sha, base64.b64decode(encoded.replace("\n", ""))
+    except Exception:  # noqa: BLE001
+        return sha, None
 
 
 def main() -> int:
@@ -129,37 +177,47 @@ def main() -> int:
     message = args.message or "chore: 通过 API 同步文件"
 
     pushed = 0
-    skipped = 0
+    unchanged = 0
     failed: list[str] = []
 
     for path in files:
         rel = path.relative_to(PROJECT_ROOT).as_posix()
         content = path.read_bytes()
+
+        remote_sha, remote_content = get_remote_state(token, rel)
+
+        # 内容一致就跳过 —— 断点续传靠的就是这一句。
+        # 换行符差异会导致误判为"有变化"，那就多推一次，不影响正确性。
+        if remote_sha and remote_content is not None and remote_content == content:
+            unchanged += 1
+            print(f"  --   {rel}（远端已是最新，跳过）")
+            continue
+
         encoded = base64.b64encode(content).decode("ascii")
-
-        remote_sha = get_remote_sha(token, rel)
-
-        # 内容没变就不推（省请求配额）
-        if remote_sha:
-            status, data = api_request("GET", f"/repos/{OWNER}/{REPO}/contents/{rel}?ref={BRANCH}", token)
-            # 无法直接比对内容（API 只给 sha，是 git blob 的 sha），所以一律推送
-
         body: dict = {"message": message, "content": encoded, "branch": BRANCH}
         if remote_sha:
             body["sha"] = remote_sha
 
-        status, data = api_request("PUT", f"/repos/{OWNER}/{REPO}/contents/{rel}", token, body)
+        # ★ 路径必须 URL 编码后再拼进 URL。
+        #   仓库里有中文文件名（如「你要实现的部分.md」），
+        #   直接把中文放进 URL 会抛 UnicodeEncodeError: 'ascii' codec can't encode ...
+        #   因为 Python 的 http.client 拼请求行时强制要求 ascii。
+        #   safe="/" 让路径分隔符保持原样。
+        from urllib.parse import quote
+
+        encoded_path = quote(rel, safe="/")
+
+        status, data = api_request("PUT", f"/repos/{OWNER}/{REPO}/contents/{encoded_path}", token, body)
 
         if status in (200, 201):
             pushed += 1
             print(f"  OK   {rel}")
         else:
-            skipped += 1
             failed.append(f"{rel}: HTTP {status} {data.get('message', '')}")
             print(f"  FAIL {rel}: HTTP {status} {data.get('message', '')[:80]}")
 
     print()
-    print(f"成功 {pushed} 个，失败 {skipped} 个")
+    print(f"新推送 {pushed} 个，跳过 {unchanged} 个，失败 {len(failed)} 个")
     if failed:
         print("失败明细：")
         for item in failed:
